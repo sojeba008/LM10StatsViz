@@ -1,0 +1,4 @@
+findspark==2.0.1
+pandas==2.0.2
+pyspark==3.2.1
+python-dotenv==1.0.0
