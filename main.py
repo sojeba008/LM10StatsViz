@@ -6,6 +6,7 @@ Created on Fri Jun  2 00:00:18 2023
 """
 
 import os
+import re
 from dotenv import load_dotenv
 import findspark
 from pyspark.sql import SparkSession
@@ -28,6 +29,10 @@ def result(score):
     else :
         return "Defeat"
 
+def removeSpacialChar(s):
+    s = re.sub(r'[^\x00-\x7F]+', '', s)
+    return s
+
 
 def convertMinuteToInt(minute):
     if "+" not in minute:
@@ -49,8 +54,14 @@ class LM10ClubGoalStatsETL:
         spark = SparkSession.builder.getOrCreate()
         self.data = spark.read.csv("input/data.csv", header=True, encoding="UTF-8")
         self.data.printSchema()
-        self.data = self.data.withColumn("Goal_assist", regexp_replace(self.data["Goal_assist"], "(\\t|null)$", ""))
+        self.data = self.data.withColumn("pk_fact", monotonically_increasing_id() + 1)
+        self.data = self.data.fillna(" ")
+        #self.data = self.data.withColumn("Goal_assist", regexp_replace(self.data["Goal_assist"], "(\\t|null)$", ""))
         self.data = self.data.withColumn("Date", regexp_replace(self.data["Date"],"-","/" ))
+        self.data = self.data.withColumn("Playing_Position", regexp_replace(self.data["Playing_Position"], " ", ""))
+        removeSpacialChar_udf = udf(removeSpacialChar, StringType())
+        #self.data = self.data.withColumn("Opponent", removeSpacialChar_udf(self.data["Opponent"])) 
+        self.data = self.data.withColumn("Goal_assist", removeSpacialChar_udf(self.data["Goal_assist"])) 
         
     
     def persitDataInDB(self, table_name, data):
@@ -83,7 +94,7 @@ class LM10ClubGoalStatsETL:
 
     def loadDimGoalAssist(self):
         self.allGoalAssist = self.data.select("Goal_assist").withColumnRenamed("Goal_assist", "name").distinct().withColumn("pk_goal_assist", monotonically_increasing_id() + 1)
-        self.allGoalAssist = self.allGoalAssist.withColumn("name", regexp_replace(self.allGoalAssist["name"], "(\\t|null)$", ""))
+        #self.allGoalAssist = self.allGoalAssist.withColumn("name", regexp_replace(self.allGoalAssist["name"], "(\\t|null)$", ""))
         self.allGoalAssist.show()
         table_name = "public.dim_goal_assist"
         self.persitDataInDB(table_name, self.allGoalAssist)        
@@ -98,7 +109,7 @@ class LM10ClubGoalStatsETL:
     def loadDimClub(self):
         self.allMessiClubs = self.data.select("Club").distinct().withColumnRenamed("Club", "name")
         self.allMessiOponents = self.data.select("Opponent").distinct().withColumnRenamed("Opponent", "name")
-        self.allClub = self.allMessiClubs.unionByName(self.allMessiOponents)
+        self.allClub = self.allMessiClubs.unionByName(self.allMessiOponents).distinct()
         self.allClub = self.allClub.withColumn("pk_club", monotonically_increasing_id() + 1)
         self.allClub.show()
         table_name = "public.dim_club"
@@ -113,7 +124,7 @@ class LM10ClubGoalStatsETL:
 
     def loadDimPlayingPosition(self):
         self.allMessiPlayingPosition = self.data.select("Playing_Position").distinct().withColumn("pk_playing_position", monotonically_increasing_id() + 1)
-        self.allMessiPlayingPosition = self.allMessiPlayingPosition.withColumn("Playing_Position", regexp_replace(self.data["Playing_Position"], " ", "")).withColumnRenamed("Playing_Position", "code")
+        self.allMessiPlayingPosition = self.allMessiPlayingPosition.withColumnRenamed("Playing_Position", "code")
         self.allMessiPlayingPosition.show()
         table_name = "public.dim_playing_position"
         self.persitDataInDB(table_name, self.allMessiPlayingPosition)
@@ -137,14 +148,13 @@ class LM10ClubGoalStatsETL:
         self.allGoalAssist.unpersist()
         self.data = self.data.join(self.allResult, [self.allResult.result == self.data.result], "inner").drop("result")
         self.allResult.unpersist()
-        self.data = self.data.join(self.allClub, [self.allClub.name == self.data.Opponent], "inner").drop("name")
-        self.allClub.unpersist()
         self.data = self.data.join(self.allVenue, [self.allVenue.Venue == self.data.Venue], "inner").drop("Venue")
         self.allVenue.unpersist()
         self.data = self.data.join(self.allMessiPlayingPosition, [self.allMessiPlayingPosition.code == self.data.Playing_Position], "inner")
         self.allMessiPlayingPosition.unpersist()
         self.data = self.data.join(self.allMinuteGoal, [self.allMinuteGoal.minute_str == self.data.Minute], "inner")
-        
+        self.data = self.data.join(self.allClub, [self.allClub.name == self.data.Opponent], "inner").drop("name")
+        self.allClub.unpersist()
         table_name = "public.fact_goal"
         factMessiGoal = self.data.select("pk_date", "pk_competition", "pk_type", "pk_goal_assist", "pk_result", "pk_club", "pk_venue", "pk_playing_position", "pk_minute").withColumn("goal",  lit(1))
         self.persitDataInDB(table_name, factMessiGoal)
